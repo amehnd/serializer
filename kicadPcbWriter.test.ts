@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll } from "bun:test"
-import { circuitJsonToKicadPcb } from "./serializer/kicadPcbWriter"
+import { circuitJsonToKicadPcb, computePcbPageGeometry } from "./serializer/kicadPcbWriter"
 import { serializeNirAsync } from "./serializer/serializer"
-import { opampNoninvNir, rcLowpassNir } from "./serializer/fixtures"
+import { opampNoninvNir, rcLowpassNir, instrumentationAmpNir } from "./serializer/fixtures"
 import type { AnyCircuitElement } from "circuit-json"
 
 describe("circuitJsonToKicadPcb", () => {
@@ -73,11 +73,13 @@ describe("circuitJsonToKicadPcb", () => {
     }
   })
 
-  it("footprint blocks have (at X Y R) from pcb_component center and rotation", () => {
+  it("footprint blocks have (at X Y R) from pcb_component center and rotation, offset to the page center", () => {
+    const board = circuitJson.find((e: any) => e.type === "pcb_board") as any
+    const { pageOffset } = computePcbPageGeometry(board.width ?? 80, board.height ?? 60)
     const pcbComponents = circuitJson.filter((e: any) => e.type === "pcb_component") as any[]
     for (const comp of pcbComponents.slice(0, 3)) {
-      const x = comp.center.x.toFixed(4)
-      const y = comp.center.y.toFixed(4)
+      const x = (comp.center.x + pageOffset.x).toFixed(4)
+      const y = (comp.center.y + pageOffset.y).toFixed(4)
       expect(kicadPcb).toContain(`(at ${x} ${y}`)
     }
   })
@@ -229,6 +231,8 @@ describe("pad rotation regression: net-to-net short detection", () => {
     // circuitJsonToKicadPcb applies centering in-place; use the same
     // (now-centered) array for both KiCad and smtpad extraction.
     const kicadPcbRc = circuitJsonToKicadPcb(out.circuitJson, rcLowpassNir as any)
+    const board = out.circuitJson.find((e: any) => e.type === "pcb_board") as any
+    const { pageOffset } = computePcbPageGeometry(board.width ?? 80, board.height ?? 60)
     const components = out.circuitJson.filter((e: any) => e.type === "pcb_component") as any[]
     const smtpads = out.circuitJson.filter((e: any) => e.type === "pcb_smtpad") as any[]
     const compMap = new Map(components.map((c: any) => [c.pcb_component_id, c]))
@@ -240,11 +244,35 @@ describe("pad rotation regression: net-to-net short detection", () => {
       if (!comp) continue
 
       const matched = kicadPads.find((kp) =>
-        Math.abs(kp.x - pad.x) < 0.1 &&
-        Math.abs(kp.y - pad.y) < 0.1,
+        Math.abs(kp.x - (pad.x + pageOffset.x)) < 0.1 &&
+        Math.abs(kp.y - (pad.y + pageOffset.y)) < 0.1,
       )
 
       expect(matched).toBeDefined()
     }
+  })
+})
+
+describe("PCB page centering (rendering/layout fix)", () => {
+  it("board outline (gr_rect) is centered on the page for a fixture with a non-trivial board_spec", async () => {
+    const out = await serializeNirAsync(instrumentationAmpNir)
+    const kicadPcb = circuitJsonToKicadPcb(out.circuitJson)
+    const board = out.circuitJson.find((e: any) => e.type === "pcb_board") as any
+    const { paperWidth, paperHeight } = computePcbPageGeometry(board.width ?? 80, board.height ?? 60)
+
+    expect(kicadPcb).toContain(`(paper "User" ${paperWidth.toFixed(4)} ${paperHeight.toFixed(4)})`)
+
+    const match = kicadPcb.match(
+      /\(gr_rect \(start ([\d.\-]+) ([\d.\-]+)\) \(end ([\d.\-]+) ([\d.\-]+)\)/,
+    )
+    expect(match).not.toBeNull()
+    const [, startX, startY, endX, endY] = match!.map(Number) as unknown as [number, number, number, number, number]
+
+    const centerX = (startX + endX) / 2
+    const centerY = (startY + endY) / 2
+
+    const TOLERANCE_MM = 0.01
+    expect(Math.abs(centerX - paperWidth / 2)).toBeLessThan(TOLERANCE_MM)
+    expect(Math.abs(centerY - paperHeight / 2)).toBeLessThan(TOLERANCE_MM)
   })
 })

@@ -134,12 +134,19 @@ kicad-cli pcb drc <file>.kicad_pcb -o /tmp/drc_out.json --format json
 > string `rc_lowpass` routes the opamp fixture instead — no other fixture
 > names are supported) re-routes from scratch and calls
 > `removeZeroLengthSegments`, but skips `enforceTracePadClearance` and both
-> chamfer passes entirely. The DRC "0 violations" result documented in
-> `PCB_LAYOUT_REPORT.md` was validated against `_gen_pcb.ts`'s output, **not**
-> against what `serializeNirAsync`/`render_pcb_viewer.ts` actually ship.
-> Treat `_gen_pcb.ts`'s DRC result as unverified for the real pipeline until
-> this is reconciled — currently in progress (see the chamfer double-apply /
-> clearance-blind-to-diagonals issue being fixed).
+> chamfer passes entirely. Its DRC results are not representative of the
+> real pipeline; always validate `serializeNirAsync`/`render_pcb_viewer.ts`
+> output directly.
+>
+> The **clearance-blind-to-diagonals issue is fixed**: `chamferCircuitJsonTracesTo45Degree`
+> now runs *before* `enforceTracePadClearance` in `serializeNirAsync`
+> (previously it ran after, so the 45-degree segments it introduces were
+> never checked against pad clearance), and `enforceTracePadClearance` itself
+> now enforces clearance on diagonal segments too, not just Manhattan ones.
+> `rc_lowpass` (0/0) and `opamp_noninv` (3 silk_over_copper, 0 unconnected)
+> are unaffected. See `PCB_LAYOUT_REPORT.md` §5.4/§5.5 for the `astracomputer`
+> DRC results, which surfaced a much larger set of pre-existing routing
+> violations on dense/complex boards — still open, see the report for detail.
 
 **Env flags** (real footprint/symbol data vs. hardcoded fallbacks):
 ```bash
@@ -254,12 +261,68 @@ you're passing in.
 - **`placement_rules_text`** (natural-language placement rules) is parsed
   but not yet used to influence layout — planned for the verifier module,
   LLM-scoped to constraint translation only, not raw coordinate generation.
-- **PCB routing is single-layer** (`F.Cu` only). Via/layer-change
-  infrastructure exists in `kicadPcbWriter.ts` but is untested in
-  production — no fixture currently exercises bottom-layer routing.
+- **~~PCB routing is single-layer~~ — stale, corrected 2026-08-24.** This
+  was true only for the small fixtures tested at the time it was written.
+  `astracomputer` (4-layer `board_spec`) already routes across all 4
+  copper layers with real vias — confirmed by inspecting the generated
+  `.kicad_pcb` directly (F.Cu/In1.Cu/In2.Cu/B.Cu segment counts all
+  nonzero). `layerCount` in `pcbRouting.ts:circuitJsonToSimpleRouteJson`
+  reads `board.num_layers` dynamically; it isn't hardcoded to 1.
+- **`serializer/router.ts` (`routeCircuit`/`routeCircuitJson`) is dead code
+  for the real `serializeNirAsync` path.** Confirmed by grep: nothing in
+  `serializer.ts` calls it — only `_gen_pcb.ts` (already flagged elsewhere
+  as a separate ad-hoc pipeline) and the unit tests do. The actual
+  production autorouting for `astracomputer` happens entirely *inside*
+  `@tscircuit/core`'s own internal "capacity-mesh-autorouting" effect,
+  invoked by `CircuitRunner` — which already uses the modern
+  `AutoroutingPipelineSolver` internally regardless of what `router.ts`
+  is set to. (An earlier session's notes describing a `router.ts` solver
+  upgrade as improving `astracomputer`'s DRC numbers were mistaken — that
+  file simply isn't in the code path that fixture exercises. `router.ts`
+  itself still uses the correct, non-deprecated solver, which is fine, but
+  it has no bearing on `astracomputer`'s output.)
+- **`enforceTracePadClearance` only checks trace-vs-*pad* clearance,
+  never trace-vs-trace.** This is the actual remaining driver of most of
+  `astracomputer`'s DRC violation count (see `PCB_LAYOUT_REPORT.md` §5.5),
+  since `@tscircuit/core`'s internal autorouter leaves same-layer,
+  different-net crossings on a board this dense that nothing downstream
+  checks for.
 - **DRC is manual**, not part of the test suite or CI — see §3's `_gen_pcb.ts`
   warning; the documented "0 violations" result needs to be reconciled
   against the actual `serializeNirAsync` pipeline.
+- **`astracomputer` currently cannot be fully autorouted at ANY board size
+  once J2 (USB-C) is correctly wired — confirmed across 7 sizes from
+  4290mm² to 8000mm² (2026-08-25, `PCB_LAYOUT_REPORT.md` §5.10).** J2's
+  real footprint places reversible-connector mirror pins (A1/B12, etc.) at
+  literally identical physical coordinates — a genuine, deliberate
+  characteristic confirmed against the real reference board, not a
+  fixture bug. `@tscircuit/core`'s internal autorouter cannot route
+  around the resulting fully-coincident pad obstacles and fails for the
+  *entire* board, not just locally near J2 — confirmed by removing only
+  J2, which restores 100% successful routing at the original 80×60mm
+  size. Board size is not the lever here: every tested size, including
+  ones far larger than the original 80×60mm default, failed identically.
+  `serializeNirAsync(astraComputerNir)` now throws
+  (`assertRoutingCompleted` in `serializer.ts`) rather than silently
+  shipping a traceless `.kicad_pcb`, so there is currently no way to
+  produce a fully routed astracomputer board with J2 correctly included.
+  A real fix needs either an obstacle-generation change upstream in
+  `@tscircuit/core` (not something this codebase controls) or a
+  footprint-level workaround that keeps J2's mirror pads in the
+  fabrication footprint without asking the autorouter to route to both.
+  (Separately: the real board's exact 42×85mm outline was also confirmed
+  infeasible to wire in directly for unrelated placement-density reasons
+  — see `PCB_LAYOUT_REPORT.md` §5.8 for that investigation.)
+- **Mounting holes and board-level silkscreen graphics (logos, connector
+  labels) from a real reference board are not emitted.** `astracomputer`'s
+  NIR fixture carries real mounting-hole positions
+  (`_NEW_mechanical_constraints.mounting_holes`, 4x M2.5 at the real
+  board's corners) but they're expressed in the *real* board's coordinate
+  frame, which only lines up with our output once the board-outline issue
+  above is fixed — still blocked, see above. Free-floating silkscreen
+  graphics ("ASTRA" logo, "2S VIN", net labels) on the real board are
+  purely manual KiCad artwork with no NIR schema field at all — genuinely
+  absent from source data, not something to fabricate.
 - **Only passive components (R, C, L, D) and independent sources (V, I)**
   are modeled as real SPICE primitives in the simulator. ICs are emitted as
   1-ohm placeholder resistors with a warning — no `.subckt` models bundled.

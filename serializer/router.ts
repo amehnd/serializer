@@ -1,5 +1,5 @@
 import {
-  CapacityMeshSolver,
+  AutoroutingPipelineSolver,
   SimpleRouteJson,
   SimplifiedPcbTrace,
 } from "@tscircuit/capacity-autorouter";
@@ -116,7 +116,16 @@ export async function routeCircuit(
   simpleRouteJson: SimpleRouteJson,
 ): Promise<RouteCircuitResult> {
   try {
-    const solver = new CapacityMeshSolver(simpleRouteJson, {
+    // CapacityMeshSolver (AutoroutingPipelineSolver2_PortPointPathing) is
+    // deprecated by the library itself in favor of AutoroutingPipelineSolver
+    // (pipeline 7 / MultiGraph), which adds DRC-aware repair/improve stages
+    // (GlobalDrcForceImproveSolver, HighDensityForceImproveSolver, etc.) that
+    // the deprecated pipeline never had. NOTE: effort:2 was tried and made
+    // things worse for the astracomputer fixture — the solver's internal
+    // repair loop hit "ran out of iterations" and aborted early, producing a
+    // much smaller/incomplete route set. Keep effort at 1 until that's
+    // understood; it is not a free quality dial for this solver version.
+    const solver = new AutoroutingPipelineSolver(simpleRouteJson, {
       effort: 1,
     });
 

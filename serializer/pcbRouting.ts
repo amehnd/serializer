@@ -551,10 +551,9 @@ export function enforceTracePadClearance(
       const ey = nextWire ? nextWire.y : sy
       const halfWidth = (seg.width ?? 0.2) / 2
 
-      const isVert = Math.abs(ex - sx) < 0.001
-      const isHoriz = Math.abs(ey - sy) < 0.001
-      if (!isVert && !isHoriz) continue
-
+      // Segments may be Manhattan (vertical/horizontal) or 45-degree
+      // chamfered diagonals — clearance must be enforced against both, or
+      // chamfered corners can cut across a neighboring pad unchecked.
       for (const pad of padData) {
         if (pad.net === trackNet) continue
 
@@ -566,23 +565,25 @@ export function enforceTracePadClearance(
 
         if (minDist < requiredDist && minDist > 0.0001) {
           const push = requiredDist - minDist
-          if (isVert) {
-            const pushDir = sx > pad.x ? 1 : -1
-            if (!found || Math.abs(push) > Math.abs(totalPushX)) {
-              totalPushX = push * pushDir
-            } else if (Math.sign(pushDir) === Math.sign(totalPushX)) {
-              totalPushX = Math.sign(totalPushX) * Math.max(Math.abs(totalPushX), push)
-            }
-            found = true
-          } else {
-            const pushDir = sy > pad.y ? 1 : -1
-            if (!found || Math.abs(push) > Math.abs(totalPushY)) {
-              totalPushY = push * pushDir
-            } else if (Math.sign(pushDir) === Math.sign(totalPushY)) {
-              totalPushY = Math.sign(totalPushY) * Math.max(Math.abs(totalPushY), push)
-            }
-            found = true
+          // Push direction: away from the pad, along the vector from the
+          // pad center to the closest point on the segment. This reduces
+          // to the old sign-of-axis-difference behavior for pure
+          // vertical/horizontal segments, and generalizes cleanly to
+          // diagonal (chamfered) ones.
+          let vx = cp.x - pad.x
+          let vy = cp.y - pad.y
+          const vlen = Math.sqrt(vx * vx + vy * vy)
+          if (vlen < 1e-6) { vx = sx >= pad.x ? 1 : -1; vy = 0 } else { vx /= vlen; vy /= vlen }
+          const pushX = vx * push
+          const pushY = vy * push
+
+          if (!found || totalPushX === 0 || Math.sign(pushX) === Math.sign(totalPushX)) {
+            totalPushX = Math.sign(totalPushX || pushX) * Math.max(Math.abs(totalPushX), Math.abs(pushX))
           }
+          if (!found || totalPushY === 0 || Math.sign(pushY) === Math.sign(totalPushY)) {
+            totalPushY = Math.sign(totalPushY || pushY) * Math.max(Math.abs(totalPushY), Math.abs(pushY))
+          }
+          found = true
         }
       }
     }
